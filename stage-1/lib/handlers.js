@@ -289,8 +289,20 @@ function validateOptionalVisibility(body) {
   return body.visibility;
 }
 
+// Checks are phrased as comparisons against a pre-subtracted headroom rather than
+// evaluating `balance + amount` directly: once balance is near +-2^53, that sum
+// itself can silently round to a representable-but-wrong double, so the overflow
+// it's meant to catch would already have been swallowed before the comparison ran.
+function creditWouldExceedCeiling(balance, amount) {
+  return amount > V.SAFE_CEILING - balance;
+}
+
+function debitWouldExceedCeiling(balance, amount) {
+  return amount > balance + V.SAFE_CEILING;
+}
+
 function applyTransfer(state, fromUser, toUser, amount) {
-  if (V.wouldExceedCeiling(fromUser.balance - amount) || V.wouldExceedCeiling(toUser.balance + amount)) {
+  if (debitWouldExceedCeiling(fromUser.balance, amount) || creditWouldExceedCeiling(toUser.balance, amount)) {
     throw errors.validation('operation would exceed the balance ceiling');
   }
   fromUser.balance -= amount;
@@ -574,7 +586,13 @@ function createSettlement(ctx) {
     }
     for (const [userId, delta] of net) {
       const user = state.users.get(userId);
-      if (user.balance + delta < 0) throw errors.insufficientFunds();
+      if (delta >= 0) {
+        if (creditWouldExceedCeiling(user.balance, delta)) throw errors.validation('operation would exceed the balance ceiling');
+      } else if (debitWouldExceedCeiling(user.balance, -delta)) {
+        throw errors.insufficientFunds();
+      } else if (user.balance + delta < 0) {
+        throw errors.insufficientFunds();
+      }
     }
     const committedAt = nowIso();
     const settlementId = store.nextId('settlement');
